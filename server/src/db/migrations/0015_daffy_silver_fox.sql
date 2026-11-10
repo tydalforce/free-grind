@@ -1,0 +1,1 @@
+CREATE INDEX "messages_media_hash_idx" ON "messages" USING btree ("media_hash") WHERE "messages"."media_hash" IS NOT NULL;

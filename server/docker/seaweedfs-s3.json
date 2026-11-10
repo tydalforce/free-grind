@@ -1,0 +1,11 @@
+{
+  "identities": [
+    {
+      "name": "freegrind",
+      "credentials": [
+        { "accessKey": "freegrind", "secretKey": "freegrind-secret" }
+      ],
+      "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+    }
+  ]
+}

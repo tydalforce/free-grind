@@ -1,0 +1,161 @@
+# Production stack: docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+# Scale the API with --scale api=N (Caddy balances across all replicas).
+# See DEPLOY.md for DNS, firewall and first start.
+name: free-grind-prod
+
+x-app-env: &app-env
+  NODE_ENV: production
+  PORT: "8080"
+  PUBLIC_API_URL: https://${API_DOMAIN}
+  PUBLIC_MEDIA_URL: https://${MEDIA_DOMAIN}
+  APP_SECRET: ${APP_SECRET}
+  DATABASE_URL: postgres://freegrind:${POSTGRES_PASSWORD}@pgbouncer:5432/freegrind
+  DATABASE_MIGRATION_URL: postgres://freegrind:${POSTGRES_PASSWORD}@db:5432/freegrind
+  REDIS_URL: redis://redis:6379
+  S3_ENDPOINT: ${S3_ENDPOINT:-http://s3:8333}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_BUCKET: ${S3_BUCKET:-freegrind-media}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+  METRICS_TOKEN: ${METRICS_TOKEN:-}
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      API_DOMAIN: ${API_DOMAIN}
+      MEDIA_DOMAIN: ${MEDIA_DOMAIN}
+      RTC_DOMAIN: ${RTC_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+      ADMIN_ALLOW: ${ADMIN_ALLOW:-0.0.0.0/0 ::/0}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [api]
+
+  api:
+    build: .
+    restart: unless-stopped
+    environment: *app-env
+    # Migrations run once per start; concurrent replicas serialize on Drizzle's lock table.
+    command: ["sh", "-c", "bun src/db/migrate.ts && bun src/main.ts"]
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+      s3-init: { condition: service_completed_successfully }
+
+  worker:
+    build: .
+    restart: unless-stopped
+    environment: *app-env
+    command: ["bun", "src/worker.ts"]
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+
+  db:
+    image: postgis/postgis:17-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: freegrind
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: freegrind
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-3GB}
+      - -c
+      - work_mem=16MB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - max_connections=200
+      - -c
+      - autovacuum_vacuum_scale_factor=0.05
+      - -c
+      - log_min_duration_statement=200
+    volumes: [db-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U freegrind"]
+      interval: 5s
+      retries: 20
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    restart: unless-stopped
+    environment:
+      DB_HOST: db
+      DB_USER: freegrind
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: freegrind
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 4000
+      DEFAULT_POOL_SIZE: 60
+      AUTH_TYPE: scram-sha-256
+    depends_on:
+      db: { condition: service_healthy }
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes: [redis-data:/data]
+
+  # Local S3 (SeaweedFS). With an external provider (R2, B2, AWS) set S3_ENDPOINT
+  # and drop these two services.
+  s3:
+    image: chrislusf/seaweedfs:3.97
+    restart: unless-stopped
+    environment:
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+    # Credentials come from .env.prod, not a file in the repo.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        printf '{"identities":[{"name":"freegrind","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","List","Tagging","Write"]}]}' "$$S3_ACCESS_KEY_ID" "$$S3_SECRET_ACCESS_KEY" > /tmp/s3.json
+        exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/tmp/s3.json -master.volumeSizeLimitMB=1024
+    volumes:
+      - s3-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -S -O /dev/null http://127.0.0.1:8333/ 2>&1 | grep -q '403' "]
+      interval: 3s
+      retries: 40
+
+  s3-init:
+    image: chrislusf/seaweedfs:3.97
+    depends_on:
+      s3: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 2
+        echo "s3.bucket.list" | weed shell -master=s3:9333 | grep -q "${S3_BUCKET:-freegrind-media}" \
+          || echo "s3.bucket.create -name ${S3_BUCKET:-freegrind-media}" | weed shell -master=s3:9333
+    restart: "no"
+
+  # Video calls. Signalling goes through Caddy (wss://RTC_DOMAIN); media uses
+  # UDP 50000-50200 and TCP 7881 directly — open them in the firewall.
+  livekit:
+    image: livekit/livekit-server:v1.9.0
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    ports: ["7881:7881", "50000-50200:50000-50200/udp"]
+    volumes: ["./docker/livekit.yaml:/etc/livekit.yaml:ro"]
+    profiles: ["calls"]
+
+volumes:
+  caddy-data:
+  caddy-config:
+  db-data:
+  redis-data:
+  s3-data:

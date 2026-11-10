@@ -1,0 +1,69 @@
+@import "tailwindcss";
+
+/* Dark-only admin theme. Colors as tokens so components stay consistent. */
+@theme {
+	--color-bg: #0b0d12;
+	--color-surface: #12151c;
+	--color-surface-2: #1a1e27;
+	--color-border: #262b36;
+	--color-text: #e6e8ee;
+	--color-muted: #8b93a7;
+	--color-accent: #f5a524;
+	--color-accent-contrast: #111;
+	--color-danger: #f26d6d;
+	--color-success: #4ade80;
+	--color-info: #60a5fa;
+	--font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+:root {
+	color-scheme: dark;
+}
+
+html,
+body,
+#root {
+	height: 100%;
+}
+
+body {
+	background: var(--color-bg);
+	color: var(--color-text);
+	font-family: var(--font-sans);
+	-webkit-font-smoothing: antialiased;
+}
+
+input,
+select,
+textarea {
+	background: var(--color-surface-2);
+	border: 1px solid var(--color-border);
+	border-radius: 0.5rem;
+	padding: 0.4rem 0.6rem;
+	color: var(--color-text);
+	font-size: 0.875rem;
+	outline: none;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+	border-color: var(--color-accent);
+}
+
+input[type="checkbox"] {
+	width: 1rem;
+	height: 1rem;
+	accent-color: var(--color-accent);
+	padding: 0;
+}
+
+::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+::-webkit-scrollbar-thumb {
+	background: var(--color-border);
+	border-radius: 999px;
+}

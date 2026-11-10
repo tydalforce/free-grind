@@ -1,0 +1,18 @@
+# Local HTTPS for testing the app against this server (profile "local-tls").
+# Caddy's own CA signs the certificates (`tls internal`); the dnsmasq service
+# resolves *.{$FG_LOCAL_DOMAIN} to this machine. See LOCAL-TLS.md.
+{
+	local_certs
+	skip_install_trust
+}
+
+api.{$FG_LOCAL_DOMAIN}, media.{$FG_LOCAL_DOMAIN} {
+	tls internal
+	encode zstd gzip
+	reverse_proxy {$API_UPSTREAM}
+}
+
+rtc.{$FG_LOCAL_DOMAIN} {
+	tls internal
+	reverse_proxy {$RTC_UPSTREAM}
+}

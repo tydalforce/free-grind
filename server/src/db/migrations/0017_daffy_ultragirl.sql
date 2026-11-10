@@ -1,0 +1,2 @@
+CREATE INDEX "conv_members_unread_idx" ON "conversation_members" USING btree ("last_activity_at") WHERE "conversation_members"."unread_count" > 0;--> statement-breakpoint
+CREATE INDEX "conv_members_other_idx" ON "conversation_members" USING btree ("other_id");

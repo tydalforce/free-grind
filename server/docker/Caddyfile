@@ -1,0 +1,54 @@
+# Reverse proxy + automatic TLS (Let's Encrypt) for the production stack.
+# Domains come from .env.prod (API_DOMAIN, MEDIA_DOMAIN, RTC_DOMAIN).
+{
+	email {$ACME_EMAIL}
+}
+
+(common) {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	# Internal only: scraped from inside the Docker network, never public.
+	@metrics path /metrics
+	respond @metrics 404
+}
+
+# Every API replica answers; Caddy spreads requests and WebSockets across them.
+(api_backend) {
+	reverse_proxy {
+		dynamic a api 8080
+		lb_policy least_conn
+		health_uri /healthz
+		health_interval 10s
+	}
+}
+
+{$API_DOMAIN} {
+	import common
+	# Admin UI/API: optionally only from given networks (ADMIN_ALLOW, CIDRs).
+	@admin_denied {
+		path /admin*
+		not remote_ip {$ADMIN_ALLOW}
+	}
+	respond @admin_denied 403
+	import api_backend
+}
+
+# Media host (public profile images + signed private media). Same backend;
+# a separate name lets a CDN sit in front of it later.
+{$MEDIA_DOMAIN} {
+	import common
+	@admin path /admin*
+	respond @admin 404
+	import api_backend
+}
+
+# LiveKit signalling (WebSocket); media flows over UDP directly to the container.
+{$RTC_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy livekit:7880
+}

@@ -1,0 +1,167 @@
+# Local/dev stack. `docker compose up -d db pgbouncer redis s3 mailpit`
+# then `bun run db:migrate && bun run dev` from server/.
+# Production adds the api/worker/caddy/livekit services (profile "prod").
+name: free-grind-server
+
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_USER: freegrind
+      POSTGRES_PASSWORD: freegrind
+      POSTGRES_DB: freegrind
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - max_connections=200
+      - -c
+      - autovacuum_vacuum_scale_factor=0.05
+      - -c
+      - log_min_duration_statement=200
+    ports: ["5432:5432"]
+    volumes: [db-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U freegrind"]
+      interval: 5s
+      retries: 20
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    environment:
+      DB_HOST: db
+      DB_USER: freegrind
+      DB_PASSWORD: freegrind
+      DB_NAME: freegrind
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 2000
+      DEFAULT_POOL_SIZE: 40
+      AUTH_TYPE: scram-sha-256
+    ports: ["6432:5432"]
+    depends_on:
+      db: { condition: service_healthy }
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports: ["6379:6379"]
+    volumes: [redis-data:/data]
+
+  # S3-compatible object storage (MinIO no longer publishes images on Docker Hub).
+  # Any S3 provider (R2, B2, AWS) works instead via S3_* env vars.
+  s3:
+    image: chrislusf/seaweedfs:3.97
+    command: server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=1024
+    ports: ["8333:8333"]
+    volumes:
+      - s3-data:/data
+      - ./docker/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      # 403 (unauthenticated) means the S3 API is up.
+      test: ["CMD-SHELL", "wget -q -S -O /dev/null http://127.0.0.1:8333/ 2>&1 | grep -q '403' "]
+      interval: 3s
+      retries: 40
+
+  # Creates the media bucket once the filer is ready. Creating it earlier
+  # leaves SeaweedFS with a listed-but-unusable bucket.
+  s3-init:
+    image: chrislusf/seaweedfs:3.97
+    depends_on:
+      s3: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 2
+        echo "s3.bucket.list" | weed shell -master=s3:9333 | grep -q freegrind-media \
+          || echo "s3.bucket.create -name freegrind-media" | weed shell -master=s3:9333
+    restart: "no"
+
+  # App services: `docker compose --profile app up -d --build`
+  api:
+    profiles: ["app"]
+    build: .
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgres://freegrind:freegrind@pgbouncer:5432/freegrind
+      DATABASE_MIGRATION_URL: postgres://freegrind:freegrind@db:5432/freegrind
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://s3:8333
+    command: ["sh", "-c", "bun src/db/migrate.ts && bun src/main.ts"]
+    ports: ["8080:8080"]
+    depends_on:
+      db: { condition: service_healthy }
+      s3-init: { condition: service_completed_successfully }
+
+  worker:
+    profiles: ["app"]
+    build: .
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgres://freegrind:freegrind@pgbouncer:5432/freegrind
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://s3:8333
+    command: ["bun", "src/worker.ts"]
+    depends_on:
+      db: { condition: service_healthy }
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports: ["8025:8025", "1025:1025"]
+
+  # Video calls (self-hosted LiveKit). Dev mode: API key "devkey", secret "secret",
+  # in the admin under Integrations → LiveKit with URL ws://<LAN-IP>:7880.
+  # Production: own keys in a livekit.yaml, TLS via the reverse proxy (wss://rtc.<domain>).
+  livekit:
+    image: livekit/livekit-server:v1.9.0
+    command: ["--dev", "--bind", "0.0.0.0", "--node-ip", "${LIVEKIT_NODE_IP:-127.0.0.1}"]
+    ports: ["7880:7880", "7881:7881", "7882:7882/udp"]
+    profiles: ["calls"]
+
+  # Local HTTPS + DNS for testing the app (see LOCAL-TLS.md):
+  # `docker compose --profile local-tls up -d caddy-local dns`
+  caddy-local:
+    image: caddy:2.10.2-alpine
+    profiles: ["local-tls"]
+    environment:
+      FG_LOCAL_DOMAIN: ${FG_LOCAL_DOMAIN:-freegrind.test}
+      # API from `bun run dev` on the host (or the "app" profile's api service).
+      API_UPSTREAM: ${FG_LOCAL_API_UPSTREAM:-host.docker.internal:8080}
+      RTC_UPSTREAM: ${FG_LOCAL_RTC_UPSTREAM:-host.docker.internal:7880}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./docker/Caddyfile.local:/etc/caddy/Caddyfile:ro
+      - caddy-local-data:/data
+
+  # Resolves *.freegrind.test to this machine for phones/emulators in the LAN;
+  # everything else is forwarded upstream. Point the device's DNS at FG_LOCAL_IP.
+  dns:
+    image: alpine:3.22
+    profiles: ["local-tls"]
+    command:
+      - sh
+      - -c
+      - >-
+        apk add --no-cache dnsmasq >/dev/null &&
+        exec dnsmasq --keep-in-foreground --no-resolv --no-hosts
+        --server=1.1.1.1 --server=9.9.9.9
+        --address=/${FG_LOCAL_DOMAIN:-freegrind.test}/${FG_LOCAL_IP:-127.0.0.1}
+        --log-queries --log-facility=-
+    ports:
+      - "${FG_LOCAL_IP:-127.0.0.1}:53:53/udp"
+      - "${FG_LOCAL_IP:-127.0.0.1}:53:53/tcp"
+
+volumes:
+  caddy-local-data:
+  db-data:
+  redis-data:
+  s3-data:

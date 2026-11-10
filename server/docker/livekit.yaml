@@ -1,0 +1,16 @@
+# LiveKit for the production stack (docker-compose.prod.yml, profile "calls").
+# API key/secret come from LIVEKIT_KEYS in the environment, not from this file.
+port: 7880
+bind_addresses: ["0.0.0.0"]
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50200
+  # Discovers the server's public IP via STUN, so clients reach the media ports.
+  use_external_ip: true
+room:
+  # Calls are 1:1; an empty room closes quickly.
+  max_participants: 2
+  empty_timeout: 60
+logging:
+  level: info
