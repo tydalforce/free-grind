@@ -1,0 +1,51 @@
+# nginx in front of the Free Grind stack (docker-compose.nginx.yml).
+# Copy to /etc/nginx/sites-available/freegrind, replace the example.org names
+# and certificate paths, enable it and `nginx -t && systemctl reload nginx`.
+# Certificates e.g. via certbot: certbot certonly --nginx -d api.example.org -d media.example.org -d rtc.example.org
+
+map $http_upgrade $fg_connection_upgrade {
+	default upgrade;
+	''      "";   # keeps upstream keepalive for normal requests
+}
+
+upstream freegrind_caddy {
+	server 127.0.0.1:8088;   # CADDY_HTTP_PORT
+	keepalive 32;
+}
+
+server {
+	listen 80;
+	listen [::]:80;
+	server_name api.example.org media.example.org rtc.example.org;
+	return 301 https://$host$request_uri;
+}
+
+server {
+	listen 443 ssl;
+	listen [::]:443 ssl;
+	http2 on;   # nginx < 1.25.1: drop this line and use "listen 443 ssl http2;" instead
+	server_name api.example.org media.example.org rtc.example.org;
+
+	ssl_certificate     /etc/letsencrypt/live/api.example.org/fullchain.pem;
+	ssl_certificate_key /etc/letsencrypt/live/api.example.org/privkey.pem;
+
+	# Album/chat uploads go up to 600 MB; the API enforces the per-user limits.
+	client_max_body_size 600m;
+
+	location / {
+		proxy_pass http://freegrind_caddy;
+		proxy_http_version 1.1;
+		proxy_set_header Host $host;
+		# Overwrite, never append: a client-sent X-Forwarded-For must not reach the API
+		# (rate limits, network bans and ADMIN_ALLOW use the leftmost address).
+		proxy_set_header X-Forwarded-For $remote_addr;
+		proxy_set_header X-Forwarded-Proto $scheme;
+		proxy_set_header Upgrade $http_upgrade;
+		proxy_set_header Connection $fg_connection_upgrade;
+		# WebSockets (chat, LiveKit signalling) stay open for a long time.
+		proxy_read_timeout 1h;
+		proxy_send_timeout 1h;
+		proxy_buffering off;
+		proxy_request_buffering off;
+	}
+}

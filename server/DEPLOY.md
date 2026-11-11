@@ -37,6 +37,18 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod exec api bun src/
 ```
 
 - Die API migriert die Datenbank bei jedem Start selbst.
+
+### Hinter einem vorhandenen nginx (80/443 schon belegt)
+
+```sh
+docker compose -f docker-compose.prod.yml -f docker-compose.nginx.yml --env-file .env.prod up -d --build
+```
+
+- Caddy lauscht dann nur auf `127.0.0.1:8088` (HTTP, anderer Port per `CADDY_HTTP_PORT` in `.env.prod`) und holt keine Zertifikate. Er verteilt weiter auf die API-Instanzen und sperrt `/admin` und `/metrics`.
+- nginx macht TLS (z. B. certbot) und leitet alle drei Hostnamen an Caddy weiter: Vorlage in [docker/nginx.conf.example](docker/nginx.conf.example).
+- `X-Forwarded-For` in nginx **setzen** (`$remote_addr`), nicht anhängen. Sonst können Clients ihre IP fälschen (Rate-Limits, Netzwerksperren, `ADMIN_ALLOW`).
+- `ACME_EMAIL` wird in dieser Variante nicht gebraucht. Die LiveKit-Ports (TCP 7881, UDP 50000–50200) laufen weiter direkt am nginx vorbei.
+- Alle weiteren `docker compose`-Befehle (exec, logs, …) mit denselben zwei `-f`-Dateien aufrufen.
 - Mehr API-Instanzen: `--scale api=3`. Caddy verteilt Anfragen und WebSockets auf alle.
 
 ## 4. Einrichtung im Admin (`https://api.<domain>/admin`)

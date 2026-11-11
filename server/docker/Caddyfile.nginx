@@ -1,0 +1,57 @@
+# Variant for a host that already runs nginx on 80/443 (docker-compose.nginx.yml).
+# nginx terminates TLS and forwards plain HTTP to this Caddy on 127.0.0.1;
+# Caddy keeps load balancing across API replicas, the /admin allow-list and
+# the /metrics block. Domains come from .env.prod (API_DOMAIN, MEDIA_DOMAIN, RTC_DOMAIN).
+{
+	auto_https off
+	servers {
+		# nginx reaches Caddy through the Docker bridge (private address); only then
+		# is X-Forwarded-For believed, so client_ip below is the real client.
+		trusted_proxies static private_ranges
+		client_ip_headers X-Forwarded-For
+	}
+}
+
+(common) {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	# Internal only: scraped from inside the Docker network, never public.
+	@metrics path /metrics
+	respond @metrics 404
+}
+
+(api_backend) {
+	reverse_proxy {
+		dynamic a api 8080
+		lb_policy least_conn
+		health_uri /healthz
+		health_interval 10s
+	}
+}
+
+http://{$API_DOMAIN} {
+	import common
+	@admin_denied {
+		path /admin*
+		not client_ip {$ADMIN_ALLOW}
+	}
+	respond @admin_denied 403
+	import api_backend
+}
+
+http://{$MEDIA_DOMAIN} {
+	import common
+	@admin path /admin*
+	respond @admin 404
+	import api_backend
+}
+
+http://{$RTC_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy livekit:7880
+}

@@ -1,0 +1,12 @@
+# Override for a host whose nginx already owns ports 80/443:
+#   docker compose -f docker-compose.prod.yml -f docker-compose.nginx.yml --env-file .env.prod up -d --build
+# Caddy then only listens on 127.0.0.1:${CADDY_HTTP_PORT:-8088} (plain HTTP);
+# nginx terminates TLS and proxies all three hostnames there. See DEPLOY.md and docker/nginx.conf.example.
+services:
+  caddy:
+    ports: !override
+      - "127.0.0.1:${CADDY_HTTP_PORT:-8088}:80"
+    volumes: !override
+      - ./docker/Caddyfile.nginx:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
