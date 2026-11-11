@@ -12,7 +12,8 @@ import { getProfileCards, invalidateProfileCard } from "./cards";
 import { activeCatalogIds } from "../catalogs/service";
 import { getRelations } from "./relations";
 import { bannedTermsHits } from "../moderation/bannedTerms";
-import { profileStub, serializeProfileDetail } from "./serialize";
+import { profileStub, serializeProfileDetail, shownDistance } from "./serialize";
+import { profileRightNow } from "../rightnow/routes";
 
 type Dynamic = {
 	distance: number | null;
@@ -67,13 +68,10 @@ async function roundMeters(): Promise<number> {
 async function detailsFor(req: FastifyRequest, ids: bigint[], opts: { stubBlocked: boolean }) {
 	const viewer = req.auth.userId;
 	const [cards, rel, dyn, round] = await Promise.all([getProfileCards(ids), getRelations(String(viewer)), dynamicFor(viewer, ids), roundMeters()]);
-	return ids.map((id) => {
+	const ctxFor = (id: bigint) => {
 		const key = String(id);
-		const card = cards.get(key);
-		if (!card || card.deleted || card.banned) return profileStub(key, "gone");
-		if (opts.stubBlocked && rel.blocked.has(key)) return profileStub(key, "blocked");
 		const d = dyn.get(key);
-		return serializeProfileDetail(card, {
+		return {
 			isSelf: id === viewer,
 			distanceMeters: d?.distance ?? null,
 			isFavorite: rel.favorites.has(key),
@@ -83,7 +81,19 @@ async function detailsFor(req: FastifyRequest, ids: bigint[], opts: { stubBlocke
 			roundMeters: round,
 			tapType: d?.tapType ?? null,
 			lastReceivedTapTimestamp: d?.lastReceivedTapTimestamp ?? null,
-		});
+		};
+	};
+	const shown = ids.filter((id) => {
+		const card = cards.get(String(id));
+		return card && !card.deleted && !card.banned && !(opts.stubBlocked && rel.blocked.has(String(id)));
+	});
+	const rightNow = await profileRightNow(shown, (key) => shownDistance(cards.get(key)!, ctxFor(BigInt(key))));
+	return ids.map((id) => {
+		const key = String(id);
+		const card = cards.get(key);
+		if (!card || card.deleted || card.banned) return profileStub(key, "gone");
+		if (opts.stubBlocked && rel.blocked.has(key)) return profileStub(key, "blocked");
+		return serializeProfileDetail(card, { ...ctxFor(id), rightNow: rightNow.get(key) });
 	});
 }
 

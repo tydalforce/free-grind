@@ -18,6 +18,7 @@ import { publicImageUrl } from "../media/routes";
 import { storeUpload } from "../media/service";
 import { getServerSetting } from "../modules/settings/settings";
 import { type ProfileCard, getProfileCards } from "../profiles/cards";
+import type { ProfileRightNow } from "../profiles/serialize";
 import { getRelations, isBlockedEitherWay } from "../profiles/relations";
 import { publishToUser } from "../realtime/bus";
 import { notifyRightNowRequest } from "../push/notify";
@@ -269,6 +270,35 @@ async function patchPost(req: FastifyRequest, version: "v4" | "v5") {
 	}
 	const [row] = await db.update(rightNowPosts).set(set).where(eq(rightNowPosts.id, post.id)).returning();
 	return { post: await postDetails(row!, { own: true }) };
+}
+
+/**
+ * Right Now part of profile details. Discreet posts never show up here (that
+ * would link them to the profile). `distanceOf` gives the profile's shown
+ * distance, used when the post shares one.
+ */
+export async function profileRightNow(ids: bigint[], distanceOf: (id: string) => number | null): Promise<Map<string, ProfileRightNow>> {
+	if (!ids.length) return new Map();
+	const rows = await db
+		.selectDistinctOn([rightNowPosts.authorId])
+		.from(rightNowPosts)
+		.where(and(inArray(rightNowPosts.authorId, ids), eq(rightNowPosts.status, "ACTIVE"), sql`${rightNowPosts.isDiscreet} <> 'TRUE'`, sql`${rightNowPosts.expiration} > now()`))
+		.orderBy(rightNowPosts.authorId, desc(rightNowPosts.createdAt));
+	const out = new Map<string, ProfileRightNow>();
+	for (const p of rows) {
+		const id = String(p.authorId);
+		const [first] = await mediaItems(p.mediaIds.slice(0, 1));
+		out.set(id, {
+			rightNow: p.hosting ? "HOSTING" : "NOT_HOSTING",
+			rightNowStatus: "ACTIVE",
+			rightNowText: p.text,
+			rightNowPosted: p.posted?.getTime() ?? null,
+			rightNowDistance: p.shareLocation === "NONE" ? null : distanceOf(id),
+			rightNowThumbnailUrl: first?.thumbnailUrl ?? null,
+			rightNowFullImageUrl: first?.fullImageUrl ?? null,
+		});
+	}
+	return out;
 }
 
 // --- Feed ------------------------------------------------------------------------

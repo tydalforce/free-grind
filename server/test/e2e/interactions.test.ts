@@ -186,10 +186,14 @@ describe("right now", () => {
 		expect((await get(a, "/v3/rightnow/active-post")).json().post.id).toBe(post.id);
 		const other = await registerAndLogin(app);
 		expect((await get(other, `/v3/rightnow/profiles/${a.profileId}`)).json().post).toMatchObject({ id: post.id, locationRadius: null });
+		const profile = (await get(other, `/v7/profiles/${a.profileId}`)).json().profiles[0];
+		expect(profile).toMatchObject({ rightNow: "HOSTING", rightNowStatus: "ACTIVE", rightNowText: "Kaffee?", rightNowPosted: post.posted });
+		expect(profile.rightNowThumbnailUrl).toBeString();
 
 		expect((await send(a, "PATCH", `/v1/rightnow/posts/${post.id}/settings`, {})).statusCode).toBe(400);
 		expect((await send(a, "PATCH", `/v1/rightnow/posts/${post.id}/settings`, { hidden: true })).json().post.postStatus).toBe("HIDDEN");
 		expect((await get(other, `/v3/rightnow/profiles/${a.profileId}`)).json().post).toBeNull();
+		expect((await get(other, `/v7/profiles/${a.profileId}`)).json().profiles[0]).toMatchObject({ rightNow: "NOT_ACTIVE", rightNowStatus: "NONE", rightNowText: null });
 		expect((await send(a, "PATCH", `/v1/rightnow/posts/${post.id}/settings`, { hidden: false })).json().post.postStatus).toBe("ACTIVE");
 		expect((await send(a, "PATCH", `/v4/rightnow/posts/${post.id}`, { hosting: "yes" })).json().type).toBe("urn:gr:err:internal_error");
 		const v4 = (await send(a, "PATCH", `/v4/rightnow/posts/${post.id}`, { text: "Neu", isDiscreet: true })).json().post;

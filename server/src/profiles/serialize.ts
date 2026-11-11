@@ -4,6 +4,27 @@ import { MEDIA_STATE_CODE, MEDIA_TYPE_CODE } from "../media/service";
 import type { ProfileCard } from "./cards";
 import { mediaBase } from "../lib/publicUrls";
 
+/** ProfileRightNow fields + status of a public (ACTIVE, non-discreet, running) post. */
+export type ProfileRightNow = {
+	rightNow: "HOSTING" | "NOT_HOSTING" | "NOT_ACTIVE";
+	rightNowStatus: "ACTIVE" | "NONE";
+	rightNowText: string | null;
+	rightNowPosted: number | null;
+	rightNowDistance: number | null;
+	rightNowThumbnailUrl: string | null;
+	rightNowFullImageUrl: string | null;
+};
+
+export const NO_PROFILE_RIGHT_NOW: ProfileRightNow = {
+	rightNow: "NOT_ACTIVE",
+	rightNowStatus: "NONE",
+	rightNowText: null,
+	rightNowPosted: null,
+	rightNowDistance: null,
+	rightNowThumbnailUrl: null,
+	rightNowFullImageUrl: null,
+};
+
 export type ViewerContext = {
 	isSelf: boolean;
 	isVisiting?: boolean;
@@ -15,6 +36,8 @@ export type ViewerContext = {
 	roundMeters: number;
 	tapType?: number | null;
 	lastReceivedTapTimestamp?: number | null;
+	/** Their public Right Now post, if any. */
+	rightNow?: ProfileRightNow;
 };
 
 /** Upstream ProfileMedia list; videos carry our extension fields. */
@@ -92,8 +115,7 @@ export function serializeProfileDetail(card: ProfileCard, ctx: ViewerContext) {
 		isRoaming: false,
 		isVisiting: ctx.isVisiting ?? false,
 		travelPlans: [],
-		rightNow: "NOT_ACTIVE",
-		rightNowStatus: "NONE",
+		...(ctx.rightNow ?? NO_PROFILE_RIGHT_NOW),
 		foundVia: "UNKNOWN",
 	};
 }
