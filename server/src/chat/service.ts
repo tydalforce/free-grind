@@ -278,6 +278,12 @@ export async function refreshDynamic(userId: bigint, otherId: bigint, messageTyp
 	await publishToUser(userId, "chat.v1.refresh_dynamic", { conversationId: conversationIdFor(userId, otherId), messageType }).catch(() => undefined);
 }
 
+/** refresh_dynamic to both sides of an album share (owner ↔ recipient). */
+export async function refreshDynamicBoth(ownerId: bigint, recipientId: bigint, expirationType: string | null | undefined): Promise<void> {
+	const messageType = expirationType && expirationType !== "INDEFINITE" ? "ExpiringAlbumV2" : "Album";
+	await Promise.all([refreshDynamic(ownerId, recipientId, messageType), refreshDynamic(recipientId, ownerId, messageType)]);
+}
+
 // --- Mutations ----------------------------------------------------------------
 
 /** Upstream answers 500 for unknown/foreign messages on these endpoints. */

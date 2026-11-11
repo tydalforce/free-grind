@@ -6,6 +6,8 @@ import { buildApp } from "../../src/app";
 import { invalidate } from "../../src/cache/local";
 import { db } from "../../src/db/client";
 import { albumShares, entitlementUserOverrides } from "../../src/db/schema";
+import { redis } from "../../src/cache/redis";
+import { userChannel } from "../../src/realtime/bus";
 import { clientHeaders, registerAndLogin } from "../helpers";
 // The app's own schema: the album page parses the feed with it.
 import { sharedAlbumViewSchema } from "../../../src/types/albums";
@@ -26,6 +28,23 @@ const cid = (a: Session, b: Session) => {
 	const [x, y] = [BigInt(a.profileId), BigInt(b.profileId)];
 	return x < y ? `${x}:${y}` : `${y}:${x}`;
 };
+
+/** Collects realtime events published to the given users (their Redis channels). */
+async function listen(userIds: string[]) {
+	const sub = redis.duplicate();
+	const got: { user: string; event: Obj }[] = [];
+	sub.on("message", (channel: string, raw: string) => got.push({ user: channel.slice(userChannel("").length), event: JSON.parse(raw) }));
+	await sub.subscribe(...userIds.map((u) => userChannel(u)));
+	const wait = async (user: string, type: string) => {
+		for (let i = 0; i < 60; i++) {
+			const hit = got.find((g) => g.user === user && g.event.type === type);
+			if (hit) return hit.event;
+			await Bun.sleep(50);
+		}
+		throw new Error(`no ${type} for ${user}`);
+	};
+	return { wait, close: () => sub.quit() };
+}
 
 async function jpeg(seed: number): Promise<Buffer> {
 	const raw = Buffer.from(Array.from({ length: 80 * 60 * 3 }, (_, i) => (i * seed * 7919) % 256));
@@ -151,8 +170,13 @@ describe("albums", () => {
 		expect(react.statusCode).toBe(201);
 		expect(react.json().body).toMatchObject({ albumId: id, ownerProfileId: Number(a.profileId), albumContentId: content, viewable: true, albumContentReply: "wow", contentType: "image/jpeg" });
 
-		// Unshare: the old message stays, but is no longer viewable.
+		// Unshare: the old message stays, but is no longer viewable; both sides get refresh_dynamic.
+		const events = await listen([a.profileId, b.profileId]);
 		expect((await app.inject({ method: "PUT", url: `/v1/albums/${id}/unshares`, headers: h(a), payload: { profiles: [{ profileId: Number(b.profileId), shareId: crypto.randomUUID() }] } })).statusCode).toBe(200);
+		for (const p of [a.profileId, b.profileId]) {
+			expect(await events.wait(p, "chat.v1.refresh_dynamic")).toMatchObject({ notificationId: expect.any(String), ref: null, payload: { conversationId: cid(a, b), messageType: "Album" } });
+		}
+		await events.close();
 		const after = (await app.inject({ method: "GET", url: `/v5/chat/conversation/${cid(a, b)}/message`, headers: h(b) })).json().messages as Obj[];
 		expect(after.find((m) => m.type === "Album")!.body).toMatchObject({ isViewable: false, ownerProfileId: null, coverUrl: null, albumNumber: null });
 		expect((await app.inject({ method: "GET", url: `/v2/albums/${id}`, headers: h(b) })).statusCode).toBe(403);

@@ -18,7 +18,7 @@ import { sniffKind } from "../media/video";
 import { getServerSetting } from "../modules/settings/settings";
 import { getProfileCards } from "../profiles/cards";
 import { getRelations, isBlockedEitherWay } from "../profiles/relations";
-import { refreshDynamic, sendSystemMessage } from "../chat/service";
+import { refreshDynamicBoth, sendSystemMessage } from "../chat/service";
 import {
 	type ContentItem,
 	albumAccess,
@@ -183,11 +183,12 @@ export async function albumRoutes(app: FastifyInstance): Promise<void> {
 
 	app.delete("/v1/albums/:id", auth, async (req) => {
 		const album = await ownAlbum(req.auth.userId, idParam((req.params as { id: string }).id));
-		const recipients = await db.select({ p: albumShares.profileId }).from(albumShares).where(eq(albumShares.albumId, album.id));
+		const recipients = await db.select({ p: albumShares.profileId, expirationType: albumShares.expirationType }).from(albumShares).where(eq(albumShares.albumId, album.id));
 		const hashes = ((await contentOf([album.id])).get(album.id) ?? []).map((c) => c.hash);
 		await db.delete(albums).where(eq(albums.id, album.id));
 		await purgeIfUnused(hashes);
-		for (const r of recipients) await refreshDynamic(r.p, album.ownerId);
+		// Deleting unshares it from everyone: both sides' album messages change.
+		for (const r of recipients) await refreshDynamicBoth(album.ownerId, r.p, r.expirationType);
 		return {};
 	});
 
@@ -418,12 +419,15 @@ export async function albumRoutes(app: FastifyInstance): Promise<void> {
 
 		for (const t of valid) {
 			// Re-sharing renews the share; its settings apply to earlier album messages too.
+			const reshare = existing.has(String(t.profileId));
 			await db
 				.insert(albumShares)
 				.values({ albumId: album.id, profileId: t.profileId, expirationType: t.expirationType })
 				.onConflictDoUpdate({ target: [albumShares.albumId, albumShares.profileId], set: { expirationType: t.expirationType, sharedAt: new Date(), firstViewedAt: null, expiresAt: null } });
 			const type = t.expirationType === "INDEFINITE" ? "Album" : "ExpiringAlbumV2";
 			await sendSystemMessage(me, t.profileId, type, { albumId: album.id });
+			// Earlier album messages now carry the new share's state (expiration, viewable again).
+			if (reshare) await refreshDynamicBoth(me, t.profileId, t.expirationType);
 		}
 		return {};
 	});
@@ -434,11 +438,11 @@ export async function albumRoutes(app: FastifyInstance): Promise<void> {
 		if (!b.success) throw errors.badRequest("Invalid request");
 		const ids = b.data.profiles.map((p) => BigInt(p.profileId));
 		if (ids.length) {
-			const removed = await db.delete(albumShares).where(and(eq(albumShares.albumId, album.id), inArray(albumShares.profileId, ids))).returning({ p: albumShares.profileId });
-			for (const r of removed) {
-				await refreshDynamic(r.p, album.ownerId);
-				await refreshDynamic(album.ownerId, r.p);
-			}
+			const removed = await db
+				.delete(albumShares)
+				.where(and(eq(albumShares.albumId, album.id), inArray(albumShares.profileId, ids)))
+				.returning({ p: albumShares.profileId, expirationType: albumShares.expirationType });
+			for (const r of removed) await refreshDynamicBoth(album.ownerId, r.p, r.expirationType);
 		}
 		return {};
 	});
@@ -446,10 +450,14 @@ export async function albumRoutes(app: FastifyInstance): Promise<void> {
 	/** The recipient drops a share of someone else's album; 403 once it's gone (upstream). */
 	app.put("/v1/albums/:id/shares/remove", auth, async (req) => {
 		const albumId = idParam((req.params as { id: string }).id);
-		const removed = await db.delete(albumShares).where(and(eq(albumShares.albumId, albumId), eq(albumShares.profileId, req.auth.userId))).returning({ albumId: albumShares.albumId });
+		const removed = await db
+			.delete(albumShares)
+			.where(and(eq(albumShares.albumId, albumId), eq(albumShares.profileId, req.auth.userId)))
+			.returning({ albumId: albumShares.albumId, expirationType: albumShares.expirationType });
 		if (!removed.length) throw errors.forbidden("Action not permitted");
 		const [album] = await db.select({ ownerId: albums.ownerId }).from(albums).where(eq(albums.id, albumId));
-		if (album) await refreshDynamic(album.ownerId, req.auth.userId);
+		// Both sides: the recipient's other devices show the message too.
+		if (album) await refreshDynamicBoth(album.ownerId, req.auth.userId, removed[0]!.expirationType);
 		return {};
 	});
 
@@ -467,10 +475,8 @@ export async function albumRoutes(app: FastifyInstance): Promise<void> {
 		const [owner] = await db.select({ ownerId: albums.ownerId, version: albums.version }).from(albums).where(eq(albums.id, albumId));
 		if (owner) {
 			await db.update(albumShares).set({ seenVersion: owner.version }).where(and(eq(albumShares.albumId, albumId), eq(albumShares.profileId, me)));
-			if (started.expirationType !== "INDEFINITE") {
-				await refreshDynamic(owner.ownerId, me, "ExpiringAlbumV2");
-				await refreshDynamic(me, owner.ownerId, "ExpiringAlbumV2");
-			}
+			// Viewed: a timed share's clock started and hasUnseenContent cleared.
+			await refreshDynamicBoth(owner.ownerId, me, started.expirationType);
 		}
 		return {};
 	});
