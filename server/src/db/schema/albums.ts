@@ -40,8 +40,9 @@ export const albumContent = pgTable(
 export const ALBUM_EXPIRATION_TYPES = ["INDEFINITE", "ONCE", "TEN_MINUTES", "ONE_HOUR", "ONE_DAY"] as const;
 
 /**
- * Who an album is shared with. A timed share starts counting at the first
- * view (`firstViewedAt`); `expiresAt` is set then. Unshare deletes the row.
+ * Who an album is shared with. A timed share (10 minutes, 1 hour, 1 day)
+ * gets `expiresAt` when it's shared; ONCE gets it at the first view
+ * (`firstViewedAt`). Unshare deletes the row.
  */
 export const albumShares = pgTable(
 	"album_shares",

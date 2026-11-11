@@ -216,6 +216,37 @@ describe("albums", () => {
 		expect(denied.json().type).toBe("urn:gr:err:tiered_feature");
 	});
 
+	test("expiring shares: 10 minutes / 1 hour / 1 day run from sharing, a view doesn't move it, re-sharing restarts it", async () => {
+		const a = await registerAndLogin(app);
+		const b = await registerAndLogin(app);
+		const id = await createAlbum(a);
+		await upload(a, id, await jpeg(14));
+		const body = async () => (await app.inject({ method: "GET", url: `/v5/chat/conversation/${cid(a, b)}/message`, headers: h(b) })).json().messages[0].body as Obj;
+
+		const before = Date.now();
+		expect((await app.inject({ method: "POST", url: `/v4/albums/${id}/shares`, headers: h(a), payload: { profiles: [{ profileId: Number(b.profileId), expirationType: "TEN_MINUTES" }] } })).statusCode).toBe(200);
+		// Set right away, before any view.
+		const until = (await body()).viewableUntil as number;
+		expect(until).toBeGreaterThanOrEqual(before + 10 * 60_000 - 1000);
+		expect(until).toBeLessThanOrEqual(Date.now() + 10 * 60_000 + 1000);
+		expect(await body()).toMatchObject({ expirationType: "TEN_MINUTES", isViewable: true });
+
+		// Opening it (more than once, unlike ONCE) leaves the expiry where it was.
+		expect((await app.inject({ method: "GET", url: `/v3/albums/${id}/view`, headers: h(b) })).statusCode).toBe(200);
+		expect((await app.inject({ method: "GET", url: `/v2/albums/${id}`, headers: h(b) })).statusCode).toBe(200);
+		expect((await app.inject({ method: "GET", url: `/v3/albums/${id}/view`, headers: h(b) })).statusCode).toBe(200);
+		expect((await body()).viewableUntil).toBe(until);
+		const [row] = await db.select().from(albumShares).where(and(eq(albumShares.albumId, id), eq(albumShares.profileId, BigInt(b.profileId))));
+		expect(row!.firstViewedAt).not.toBeNull();
+		expect(row!.expiresAt!.getTime()).toBe(until);
+
+		// Re-sharing (here as 1 day) restarts it from the new share.
+		expect((await app.inject({ method: "POST", url: `/v4/albums/${id}/shares`, headers: h(a), payload: { profiles: [{ profileId: Number(b.profileId), expirationType: "ONE_DAY" }] } })).statusCode).toBe(200);
+		const renewed = await body();
+		expect(renewed).toMatchObject({ expirationType: "ONE_DAY", isViewable: true });
+		expect((renewed.viewableUntil as number) - Date.now()).toBeGreaterThan(24 * 3_600_000 - 60_000);
+	});
+
 	test("drawer media into an album; expiring status endpoints", async () => {
 		const a = await registerAndLogin(app);
 		const up = await app.inject({ method: "POST", url: "/v5/chat/media/upload", headers: { ...h(a), "content-type": "image/jpeg" }, payload: await jpeg(17) });

@@ -26,6 +26,7 @@ import {
 	contentOf,
 	contentType,
 	counts,
+	expiresAtOnShare,
 	isProcessing,
 	isShareActive,
 	isoLocal,
@@ -420,10 +421,13 @@ export async function albumRoutes(app: FastifyInstance): Promise<void> {
 		for (const t of valid) {
 			// Re-sharing renews the share; its settings apply to earlier album messages too.
 			const reshare = existing.has(String(t.profileId));
+			const sharedAt = new Date();
+			// Timed shares run from now; ONCE starts at the first view.
+			const expiresAt = expiresAtOnShare(t.expirationType, sharedAt);
 			await db
 				.insert(albumShares)
-				.values({ albumId: album.id, profileId: t.profileId, expirationType: t.expirationType })
-				.onConflictDoUpdate({ target: [albumShares.albumId, albumShares.profileId], set: { expirationType: t.expirationType, sharedAt: new Date(), firstViewedAt: null, expiresAt: null } });
+				.values({ albumId: album.id, profileId: t.profileId, expirationType: t.expirationType, sharedAt, expiresAt })
+				.onConflictDoUpdate({ target: [albumShares.albumId, albumShares.profileId], set: { expirationType: t.expirationType, sharedAt, firstViewedAt: null, expiresAt } });
 			const type = t.expirationType === "INDEFINITE" ? "Album" : "ExpiringAlbumV2";
 			await sendSystemMessage(me, t.profileId, type, { albumId: album.id });
 			// Earlier album messages now carry the new share's state (expiration, viewable again).

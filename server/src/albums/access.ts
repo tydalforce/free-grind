@@ -8,8 +8,9 @@ import { getServerSetting } from "../modules/settings/settings";
 
 /**
  * Album access rules shared by the album routes and chat serialization.
- * A share is active while it exists and hasn't expired; timed shares start
- * their clock at the recipient's first access (ONCE: 30 minutes, like upstream).
+ * A share is active while it exists and hasn't expired. Timed shares (10
+ * minutes, 1 hour, 1 day) count from the moment they're shared; ONCE starts
+ * its 30-minute viewing window at the recipient's first access.
  */
 
 export type AlbumRow = typeof albums.$inferSelect;
@@ -47,13 +48,26 @@ export async function shareFor(albumId: number, profileId: bigint): Promise<Shar
 	return row ?? null;
 }
 
-/** First access by the recipient starts a timed share's clock. */
+/**
+ * When a share made at `now` expires: timed shares count from sharing, ONCE
+ * only from the first view (see startShareClock), INDEFINITE never.
+ */
+export function expiresAtOnShare(expirationType: ExpirationType, now = new Date()): Date | null {
+	if (expirationType === "ONCE") return null;
+	const ms = EXPIRATION_MS[expirationType];
+	return ms == null ? null : new Date(now.getTime() + ms);
+}
+
+/**
+ * Records the recipient's first access. For ONCE that starts its viewing
+ * window; a timed share's expiry was already set when it was shared.
+ */
 export async function startShareClock(share: ShareRow, now = new Date()): Promise<ShareRow> {
 	if (share.firstViewedAt) return share;
 	const ms = EXPIRATION_MS[share.expirationType];
 	const [updated] = await db
 		.update(albumShares)
-		.set({ firstViewedAt: now, expiresAt: ms == null ? null : new Date(now.getTime() + ms) })
+		.set({ firstViewedAt: now, expiresAt: share.expiresAt ?? (ms == null ? null : new Date(now.getTime() + ms)) })
 		.where(and(eq(albumShares.albumId, share.albumId), eq(albumShares.profileId, share.profileId), sql`${albumShares.firstViewedAt} IS NULL`))
 		.returning();
 	return updated ?? (await shareFor(share.albumId, share.profileId)) ?? share;
